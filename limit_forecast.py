@@ -13,13 +13,14 @@ while there is still budget to do it. No tokens, no network: only the data Claud
 line. Standard library only.
 """
 import json
+import re
 import os
 import shutil
 import subprocess
 import sys
 import time
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 KEEP_S = 6 * 3600          # samples kept
 PACE_S = 45 * 60           # pace is measured over the last 45 minutes of the current window
 MIN_SPAN_S = 5 * 60        # ... and needs at least 5 minutes of it
@@ -102,13 +103,35 @@ def segment(window, f):
 
 # ---------- status line ----------
 
+GIT_BASH = (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe")
+
+
+def find_bash(env=None, fallbacks=GIT_BASH):
+    """The bash Claude Code itself uses. On Windows that is Git Bash, never the WSL stubs in System32 or
+    WindowsApps: inside WSL a Windows path does not exist, and the user's own status line came back empty."""
+    env = os.environ if env is None else env
+    if os.name != "nt":
+        return shutil.which("bash", path=env.get("PATH"))
+    if env.get("CLAUDE_CODE_GIT_BASH_PATH"):
+        return env["CLAUDE_CODE_GIT_BASH_PATH"]
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        low = d.lower().replace("/", "\\").rstrip("\\")
+        if low.endswith("\\windows\\system32") or low.endswith("\\windowsapps") or low.endswith("\\sysnative"):
+            continue
+        p = os.path.join(d, "bash.exe")
+        if os.path.isfile(p):
+            return p
+    return next((p for p in fallbacks if os.path.isfile(p)), None)
+
+
 def statusline(stdin_text, now=None, argv=()):
     now = time.time() if now is None else now
     argv = list(argv)
     own = ""
     if "--then" in argv:
         cmd = argv[argv.index("--then") + 1]
-        bash = shutil.which("bash")   # Claude Code runs status lines in bash (Git Bash on Windows), not cmd.exe
+        bash = find_bash()   # Claude Code runs status lines in bash (Git Bash on Windows), not cmd.exe
         try:
             r = subprocess.run([bash, "-c", cmd] if bash else cmd, shell=not bash, input=stdin_text,
                                capture_output=True, text=True, timeout=5)
@@ -168,12 +191,171 @@ def hook(stdin_text, now=None):
             return 0
         with open(warned_p, "w", encoding="utf-8") as fh:
             json.dump(warned, fh)
-        print(f"[limit-forecast] Plan usage: {'; '.join(notes)}. Before starting anything long: commit what works, "
-              "and write a short HANDOFF.md (done / in progress / next / where things are), so the work survives "
-              "if the session stops at the limit. Tell the user about the limit in one line.")
+        event = json.loads(stdin_text or "{}")
+        cwd = event.get("cwd") or os.getcwd()
+        wrote = None
+        try:
+            wrote = write_handoff(cwd, event.get("transcript_path") or latest_transcript(cwd),
+                                  status="Plan usage: " + "; ".join(notes))
+        except Exception:  # noqa: BLE001 — the note still goes out without the file
+            wrote = None
+        done = (f" I already wrote {wrote} with the last request, the plan and the code state; add what it misses."
+                if wrote else " Write a short HANDOFF.md (done / in progress / next / where things are).")
+        print(f"[limit-forecast] Plan usage: {'; '.join(notes)}. Before starting anything long, commit what works."
+              f"{done} Then the work survives if the session stops at the limit. Tell the user about the limit "
+              "in one line.")
     except Exception:  # noqa: BLE001 — a usage note is never worth blocking a prompt
         return 0
     return 0
+
+
+# ---------- handoff ----------
+
+TEST_CMD = re.compile(
+    r"\b(pytest|py\.test|unittest|tox|jest|vitest|mocha|rspec|phpunit|ctest)\b|\b(npm|yarn|pnpm|bun)\s+(run\s+)?test\b"
+    r"|\bgo\s+test\b|\bcargo\s+(test|nextest)\b|\b(mvn|gradlew?)\b.*\btest\b|\bdotnet\s+test\b|\bnode\s+--test\b"
+    r"|\bmake\s+(check|test)\b|(^|[\s/\\])(test_\w+|\w+_test|\w+\.(test|spec))\.(py|[cm]?[jt]sx?|rb)\b", re.I)
+FAILED_OUTPUT = re.compile(r"\bFAILED\b|\b[1-9]\d*\s+(failed|failing|errors?)\b|^FAIL\b|^not ok \d|\bpanicked\b"
+                           r"|^Traceback \(most recent call last\)", re.M)
+HANDOFF = "HANDOFF.md"
+
+
+def project_slug(path):
+    """The folder name Claude Code uses for a project's transcripts."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
+
+
+def latest_transcript(root, projects_dir=None):
+    base = projects_dir or os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or
+                                        os.path.join(os.path.expanduser("~"), ".claude"), "projects")
+    d = os.path.join(base, project_slug(root))
+    if not os.path.isdir(d):
+        return None
+    files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".jsonl")]
+    return max(files, key=os.path.getmtime) if files else None
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def read_intent(transcript):
+    """Last user requests, the last TodoWrite plan, and the last test run, from a Claude Code transcript."""
+    prompts, todos, uses, results = [], None, {}, {}
+    last_test = None
+    with open(transcript, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if e.get("type") == "user":
+                t = _text(content).strip()
+                if t and not t.startswith("<"):            # skip command and system wrappers
+                    prompts.append(t)
+                for b in content if isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        results[b.get("tool_use_id")] = (bool(b.get("is_error")), _text(b.get("content")) or
+                                                         (b.get("content") if isinstance(b.get("content"), str) else ""))
+            elif e.get("type") == "assistant" and isinstance(content, list):
+                for b in content:
+                    if not isinstance(b, dict) or b.get("type") != "tool_use":
+                        continue
+                    inp = b.get("input") or {}
+                    if b.get("name") == "TodoWrite" and isinstance(inp.get("todos"), list):
+                        todos = inp["todos"]
+                    if b.get("name") in ("Bash", "PowerShell") and TEST_CMD.search(str(inp.get("command", ""))):
+                        last_test = (b.get("id"), inp.get("command"))
+                        uses[b.get("id")] = inp.get("command")
+    test = None
+    if last_test:
+        err, out = results.get(last_test[0], (False, None))
+        if out is None:
+            test = (last_test[1], "no result recorded")
+        else:
+            failed = err or bool(FAILED_OUTPUT.search(out))
+            tail = " ".join(out.strip().splitlines()[-2:])[:200]
+            test = (last_test[1], ("FAILED" if failed else "passed") + (f": {tail}" if tail else ""))
+    return {"prompts": prompts[-2:], "todos": todos, "test": test}
+
+
+def _git(root, *args):
+    try:
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _exclude(root):
+    git_dir = (_git(root, "rev-parse", "--git-dir") or "").strip()
+    if not git_dir:
+        return
+    path = os.path.join(git_dir if os.path.isabs(git_dir) else os.path.join(root, git_dir), "info", "exclude")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    have = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    if HANDOFF not in have.split():
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(("" if have.endswith("\n") or not have else "\n") + HANDOFF + "\n")
+
+
+def write_handoff(root, transcript=None, test_cmd=None, status=None):
+    """Write HANDOFF.md in root: the request, the plan, the code state (diffstat, never the changed lines)."""
+    root = os.path.abspath(root)
+    intent = read_intent(transcript) if transcript and os.path.exists(transcript) else None
+    out = [f"# HANDOFF", "", f"Written by limit-forecast at {time.strftime('%Y-%m-%d %H:%M')}"
+           + (f". {status}" if status else "") + ".", "", "## What was being done", ""]
+    if intent and intent["prompts"]:
+        for label, p in zip(["Before that" if len(intent["prompts"]) > 1 else "Last request", "Last request"],
+                            intent["prompts"]):
+            out.append(f"**{label}:**")
+            out += ["> " + l for l in p[:1500].splitlines()] + [""]
+    else:
+        out += ["(no transcript found; write the goal here in one line)", ""]
+    if intent and intent["todos"]:
+        out += ["## Plan (last TodoWrite)", ""]
+        tag = {"completed": "done", "in_progress": "in progress", "pending": "todo"}
+        out += [f"- [{tag.get(t.get('status'), t.get('status', '?'))}] {t.get('content', '')}" for t in intent["todos"]]
+        out.append("")
+    out += ["## Code state", ""]
+    if _git(root, "rev-parse", "--is-inside-work-tree") is None:
+        out += ["This folder is not a git repository: nothing to list. Copy the folder or commit before switching tools.", ""]
+    else:
+        _exclude(root)
+        branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "?").strip()
+        head = (_git(root, "log", "-1", "--format=%h %s") or "(no commits yet)").strip()
+        out += [f"Branch `{branch}`, last commit `{head}`.", ""]
+        stat = (_git(root, "diff", "--stat", "HEAD") or "").rstrip()
+        untracked = [u for u in (_git(root, "ls-files", "--others", "--exclude-standard") or "").splitlines() if u]
+        if not stat and not untracked:
+            out += ["No uncommitted changes.", ""]
+        else:
+            if stat:
+                out += ["Uncommitted changes (diffstat only; the changed lines are in git, not here):", "", "```",
+                        stat, "```", ""]
+            if untracked:
+                out += ["Untracked files:", ""] + [f"- {u}" for u in untracked[:50]] + [""]
+    out += ["## Tests", ""]
+    if test_cmd:
+        out += [f"Run: `{test_cmd}`", ""]
+    elif intent and intent["test"]:
+        out += [f"Last run: `{intent['test'][0]}` -> {intent['test'][1]}", ""]
+    else:
+        out += ["(no test run seen; add the command with --test-cmd)", ""]
+    out += ["## How to continue", "",
+            "- Same tool after the reset: run `claude --continue` (or `claude --resume`) in this folder.",
+            "- Another tool or model: give it this file and say \"continue from HANDOFF.md\".", ""]
+    path = os.path.join(root, HANDOFF)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
+    return path
 
 
 # ---------- install ----------
@@ -207,7 +389,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "status"
     if cmd in ("-h", "--help"):
-        print(__doc__ + "\nusage: limit_forecast.py statusline [--then CMD] | hook | status | install [SETTINGS]")
+        print(__doc__ + "\nusage: limit_forecast.py statusline [--then CMD] | hook | status | install [SETTINGS]"
+              "\n                         | handoff [--dir DIR] [--transcript JSONL] [--test-cmd CMD]")
         return 0
     if cmd == "--version":
         print(__version__)
@@ -216,6 +399,13 @@ def main(argv=None):
         return statusline(sys.stdin.read(), argv=argv[1:])
     if cmd == "hook":
         return hook(sys.stdin.read())
+    if cmd == "handoff":
+        opt = lambda k: argv[argv.index(k) + 1] if k in argv and argv.index(k) + 1 < len(argv) else None
+        root = opt("--dir") or os.getcwd()
+        transcript = opt("--transcript") or latest_transcript(root)
+        print(f"wrote {write_handoff(root, transcript, test_cmd=opt('--test-cmd'))}"
+              + ("" if transcript else " (no Claude Code session found for this folder: git state only)"))
+        return 0
     if cmd == "install":
         path = argv[1] if len(argv) > 1 else os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
         print(f"installed into {install(path)} (a .bak was left next to it)")
