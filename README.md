@@ -27,6 +27,22 @@ As a `UserPromptSubmit` hook it reads the same file and, when the 5-hour limit i
 
 No tokens, no network, no credentials read: only what Claude Code already hands the status line. Standard library only, Python 3.8+.
 
+## HANDOFF.md: so the work survives the limit
+
+When the limit hits mid-task, the code is still on disk. What's lost is the *intent*: what you asked for, the plan, which step it was on. When the hook warns, it also writes `HANDOFF.md` in the project:
+
+- **the last two requests** you made in the session, and **the plan** from the last TodoWrite (`[done]` / `[in progress]` / `[todo]`), read from the session's transcript;
+- **the code state:** branch, last commit, uncommitted files as a **diffstat only** (the changed lines stay in git and never land in this file, because they can hold secrets), and untracked files;
+- **the last test run** seen in the session and whether it failed (or the command you pass with `--test-cmd`);
+- **how to continue:** `claude --continue` / `--resume` in the same folder after the reset, or hand the file to another tool or model.
+
+`HANDOFF.md` is added to `.git/info/exclude`, so it never shows up in `git status`, and your `.gitignore` is left alone. Write one any time by hand:
+
+```sh
+python limit_forecast.py handoff                       # this folder, its latest Claude Code session
+python limit_forecast.py handoff --dir ~/proj --test-cmd "npm test"
+```
+
 ## Install
 
 ```sh
@@ -34,7 +50,7 @@ curl -O https://raw.githubusercontent.com/klavdiy-core/limit-forecast/main/limit
 python limit_forecast.py install                     # ~/.claude/settings.json; or pass another settings file
 ```
 
-`install` sets the status line and adds the hook, leaving everything else and a `.bak`. **If you already have a status line, it is kept**: limit-forecast runs it first (`--then "<your command>"`, same input, through bash like Claude Code does) and appends its own segment. Running `install` twice changes nothing.
+`install` sets the status line and adds the hook, leaving everything else and a `.bak`. **If you already have a status line, it is kept**: limit-forecast runs it first (`--then "<your command>"`, same input, through bash like Claude Code does) and appends its own segment. On Windows that bash is Git Bash (`CLAUDE_CODE_GIT_BASH_PATH`, then PATH): the WSL `bash.exe` stubs in `System32` and `WindowsApps` are skipped, because inside WSL a Windows path doesn't exist and your own line would vanish (found by a teammate on a clean clone). Running `install` twice changes nothing.
 
 By hand:
 
@@ -60,7 +76,7 @@ By hand:
 python -m unittest discover -s tests
 ```
 
-Pace and time-to-full from samples, "runs out before reset", a new window starting fresh, too little data, no `rate_limits` at all, keeping your own status line, pruning old samples, the hook staying quiet when fine, warning near the end, not nagging, ignoring stale data, surviving broken state files, and an install that keeps an existing status line. Every check here was broken on purpose to see a test go red.
+Pace and time-to-full from samples, "runs out before reset", a new window starting fresh, too little data, no `rate_limits` at all, keeping your own status line, pruning old samples, the hook staying quiet when fine, warning near the end, not nagging, ignoring stale data, surviving broken state files, and an install that keeps an existing status line. Handoff: a real temporary git repo and a hand-made transcript (no line from a real session): modified and untracked files, branch and commit, no changed lines leaking, the requests, the plan, the failing test, `.git/info/exclude`, a clean tree, a folder that isn't a repo, the hook writing it, and finding the folder's latest session. Choosing Git Bash over the WSL stubs. Every check here was broken on purpose to see a test go red.
 
 ## License
 

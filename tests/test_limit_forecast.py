@@ -93,6 +93,24 @@ class Forecast(Base):
         self.assertTrue(s.startswith("my line"), s)
         self.assertIn("5h 20%", s)
 
+    def test_never_picks_the_wsl_bash_stub(self):
+        # Windows ships bash.exe stubs for WSL in System32 and WindowsApps; Claude Code uses Git Bash.
+        # With a WSL stub first on PATH, a Windows path inside --then does not exist and the user's line vanished.
+        if os.name != "nt":
+            self.skipTest("Windows only")
+        base = self.tmp.name
+        wsl = os.path.join(base, "Windows", "System32")
+        apps = os.path.join(base, "AppData", "Local", "Microsoft", "WindowsApps")
+        git = os.path.join(base, "Git", "usr", "bin")
+        for d in (wsl, apps, git):
+            os.makedirs(d)
+            open(os.path.join(d, "bash.exe"), "w").close()
+        path = os.pathsep.join([wsl, apps, git])
+        self.assertEqual(lf.find_bash(env={"PATH": path}).lower(), os.path.join(git, "bash.exe").lower())
+        forced = os.path.join(base, "custom", "bash.exe")
+        self.assertEqual(lf.find_bash(env={"PATH": path, "CLAUDE_CODE_GIT_BASH_PATH": forced}), forced)
+        self.assertIsNone(lf.find_bash(env={"PATH": os.pathsep.join([wsl, apps])}, fallbacks=()))
+
     def test_old_samples_are_dropped(self):
         for k in range(300):
             self.line(event(five=1 + k * 0.01, five_reset=T0 + 9 * 24 * H), T0 - 30 * H + k * 60)
