@@ -1,0 +1,67 @@
+# limit-forecast
+
+See your Claude Code plan limit running out before it does.
+
+> RU: «кончились лимиты» посреди работы — потому что процент виден, а темп нет. limit-forecast считает скорость расхода и показывает, когда при таком темпе будет 100% и когда сброс. А когда конец близко, говорит самому Claude: закоммить и запиши передачу дел, пока есть чем.
+
+## What hurts
+
+You're deep in a task, the limit hits, the session stops mid-change. The percentage was there all along. What wasn't there: *how fast* it was going, and whether you'd reach 100% before the window resets.
+
+## What it does
+
+Claude Code gives its status line the plan's rate limits (Pro and Max: 5-hour and 7-day, percent used and reset time). limit-forecast, used as the status line:
+
+- records those numbers (a small file in `~/.claude/limit-forecast/`, last 6 hours, across all your sessions — the limit is per account);
+- measures your pace over the last 45 minutes of the current window;
+- shows when you hit 100% at that pace, next to when the window resets:
+
+```
+5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41%
+! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52%
+```
+
+`!` means: at this pace you run out **before** the reset.
+
+As a `UserPromptSubmit` hook it reads the same file and, when the 5-hour limit is at 85% (7-day at 90%) or will run out within 20 minutes, adds a short note to Claude's context: commit what works and write a `HANDOFF.md` (done / in progress / next / where things are) before starting anything long, and tell you in one line. It says it once per level (again after 5 more points), stays quiet on data older than 10 minutes, and never blocks a prompt.
+
+No tokens, no network, no credentials read: only what Claude Code already hands the status line. Standard library only, Python 3.8+.
+
+## Install
+
+```sh
+curl -O https://raw.githubusercontent.com/klavdiy-core/limit-forecast/main/limit_forecast.py
+python limit_forecast.py install                     # ~/.claude/settings.json; or pass another settings file
+```
+
+`install` sets the status line and adds the hook, leaving everything else and a `.bak`. **If you already have a status line, it is kept**: limit-forecast runs it first (`--then "<your command>"`, same input, through bash like Claude Code does) and appends its own segment. Running `install` twice changes nothing.
+
+By hand:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "python /path/limit_forecast.py statusline", "refreshInterval": 60 },
+  "hooks": { "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "python /path/limit_forecast.py hook" } ] } ] }
+}
+```
+
+`python limit_forecast.py status` prints the current forecast in a terminal.
+
+## Limits (said plainly)
+
+- The rate limits only reach the status line for claude.ai **Pro and Max** subscribers, and only after the session's first response. With an API key you'll see `no plan limits yet`.
+- The pace needs at least 5 minutes of samples in the current window. Samples arrive when the status line refreshes (on activity, and every 60 s with `refreshInterval`).
+- A forecast is a straight line through the last 45 minutes. A burst of agents changes it fast; that's what the `!` is for.
+- Built against the status-line and hook formats in the [Claude Code docs](https://code.claude.com/docs/en/statusline); tested with that input shape, not yet watched across a full 5-hour window in a live session. If your numbers look off, an issue with `python limit_forecast.py status` output helps.
+
+## Test
+
+```sh
+python -m unittest discover -s tests
+```
+
+Pace and time-to-full from samples, "runs out before reset", a new window starting fresh, too little data, no `rate_limits` at all, keeping your own status line, pruning old samples, the hook staying quiet when fine, warning near the end, not nagging, ignoring stale data, surviving broken state files, and an install that keeps an existing status line. Every check here was broken on purpose to see a test go red.
+
+## License
+
+MIT
