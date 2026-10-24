@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 KEEP_S = 6 * 3600          # samples kept
 PACE_S = 45 * 60           # pace is measured over the last 45 minutes of the current window
 MIN_SPAN_S = 5 * 60        # ... and needs at least 5 minutes of it
@@ -29,6 +29,7 @@ WARN_PCT = {"five_hour": 85, "seven_day": 90}
 WARN_MINUTES = 20
 AGAIN_AFTER = 5            # warn again after 5 more points
 NAMES = {"five_hour": ("5h", "5-hour"), "seven_day": ("7d", "7-day")}
+WEEK_S = 7 * 24 * 3600
 
 
 def _dir():
@@ -75,11 +76,19 @@ def forecast(samples, window, now):
         var = sum((t - mt) ** 2 for t, _ in pts)
         slope = sum((t - mt) * (p - mp) for t, p in pts) / var if var else 0.0
         rate = slope * 3600 if slope > 0 else 0.0
+    per_day = None
+    if window == "seven_day" and last["r"]:
+        # the week is planned by its whole pace (nights and idle days included), not by the last 45 minutes:
+        # a burst stretched over three days cried wolf after every busy hour
+        elapsed_h = (now - (last["r"] - WEEK_S)) / 3600
+        rate = last["p"] / elapsed_h if elapsed_h >= 1 else None
+        days_left = (last["r"] - now) / 86400
+        per_day = (100 - last["p"]) / days_left if days_left > 0 else None
     to_full = (100 - last["p"]) / rate * 60 if rate and rate > 0.05 else None
     to_reset = (last["r"] - now) / 60 if last["r"] else None
     return {
         "pct": last["p"], "resets_at": last["r"], "age_s": now - last["t"],
-        "rate_per_h": rate, "minutes_to_full": to_full, "minutes_to_reset": to_reset,
+        "rate_per_h": rate, "minutes_to_full": to_full, "minutes_to_reset": to_reset, "per_day_left": per_day,
         "runs_out_before_reset": bool(to_full is not None and to_reset is not None and to_full < to_reset),
     }
 
@@ -92,7 +101,9 @@ def _hm(minutes):
 def segment(window, f):
     short = NAMES[window][0]
     s = f"{short} {f['pct']:.0f}%"
-    if f["rate_per_h"]:
+    if window == "seven_day" and f.get("per_day_left") is not None:
+        s += f" ({f['per_day_left']:.0f}%/day left)"          # what a week can be planned with
+    elif f["rate_per_h"]:
         s += f" +{f['rate_per_h']:.0f}%/h"
     if f["minutes_to_full"] is not None and (window == "five_hour" or f["runs_out_before_reset"]):
         s += f" -> full ~{_hm(f['minutes_to_full'])}"
@@ -204,7 +215,12 @@ def hook(stdin_text, now=None):
         print(f"[limit-forecast] Plan usage: {'; '.join(notes)}. Before starting anything long, commit what works."
               f"{done} Then the work survives if the session stops at the limit. Tell the user about the limit "
               "in one line.")
-    except Exception:  # noqa: BLE001 — a usage note is never worth blocking a prompt
+    except Exception as e:  # noqa: BLE001 — a usage note is never worth blocking a prompt, but it is logged
+        try:
+            with open(os.path.join(_dir(), "errors.log"), "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} hook: {type(e).__name__}: {str(e)[:200]}\n")
+        except OSError:
+            pass
         return 0
     return 0
 

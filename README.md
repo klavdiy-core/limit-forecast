@@ -13,12 +13,13 @@ You're deep in a task, the limit hits, the session stops mid-change. The percent
 Claude Code gives its status line the plan's rate limits (Pro and Max: 5-hour and 7-day, percent used and reset time). limit-forecast, used as the status line:
 
 - records those numbers (a small file in `~/.claude/limit-forecast/`, last 6 hours, across all your sessions — the limit is per account);
-- measures your pace over the last 45 minutes of the current window;
+- measures your pace: the 5-hour window over its last 45 minutes; the 7-day window over the whole week so far
+  (nights and idle days included), and shows how many percent a day are left until it resets;
 - shows when you hit 100% at that pace, next to when the window resets:
 
 ```
-5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41%
-! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52%
+5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41% (20%/day left)
+! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52% (16%/day left)
 ```
 
 `!` means: at this pace you run out **before** the reset.
@@ -67,7 +68,9 @@ By hand:
 
 - The rate limits only reach the status line for claude.ai **Pro and Max** subscribers, and only after the session's first response. With an API key you'll see `no plan limits yet`.
 - The pace needs at least 5 minutes of samples in the current window. Samples arrive when the status line refreshes (on activity, and every 60 s with `refreshInterval`).
-- A forecast is a straight line through the last 45 minutes. A burst of agents changes it fast; that's what the `!` is for.
+- The 5-hour forecast is a straight line through the last 45 minutes; a burst of agents changes it fast, that's what
+  the `!` is for. The 7-day one uses the week's average, so one busy hour no longer flags the whole week.
+- If the hook itself fails, the prompt still goes through and the reason lands in `errors.log` next to the samples.
 - Built against the status-line and hook formats in the [Claude Code docs](https://code.claude.com/docs/en/statusline); tested with that input shape, not yet watched across a full 5-hour window in a live session. If your numbers look off, an issue with `python limit_forecast.py status` output helps.
 
 ## Test
