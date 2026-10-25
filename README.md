@@ -20,9 +20,10 @@ Claude Code gives its status line the plan's rate limits (Pro and Max: 5-hour an
 ```
 5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41% (20%/day left)
 ! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52% (16%/day left)
+! 5h 100% limit reached, reset in 50m | 7d 61% (13%/day left)
 ```
 
-`!` means: at this pace you run out **before** the reset.
+`!` means: at this pace you run out **before** the reset, or you already have (then it says only when it comes back).
 
 As a `UserPromptSubmit` hook it reads the same file and, when the 5-hour limit is at 85% (7-day at 90%) or will run out within 20 minutes, adds a short note to Claude's context: commit what works and write a `HANDOFF.md` (done / in progress / next / where things are) before starting anything long, and tell you in one line. It says it once per level (again after 5 more points), stays quiet on data older than 10 minutes, and never blocks a prompt.
 

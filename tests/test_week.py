@@ -41,6 +41,36 @@ class Week(Base):
         self.assertAlmostEqual(f["per_day_left"], 19.0, places=0)
 
 
+class Full(Base):
+    """An outside re-grade (25.10): at 100% the line said 'full ~0m', at 104% '-1%/day left'."""
+
+    def test_a_full_week_says_limit_reached_and_when_it_resets(self):
+        self.line(event(seven=100.0, seven_reset=T0 + 2 * DAY), T0)
+        line = self.line(event(seven=104.0, seven_reset=T0 + 2 * DAY), T0 + 300)
+        self.assertIn("7d 100% limit reached, reset in 47h55", line)
+        self.assertNotIn("full ~", line)
+        self.assertNotIn("day left", line)
+        self.assertTrue(line.startswith("! "), line)                # still flagged: you are out
+
+    def test_a_full_five_hour_window_too(self):
+        self.line(event(five=100.0, five_reset=T0 + H), T0)
+        line = self.line(event(five=100.0, five_reset=T0 + H), T0 + 600)
+        self.assertIn("5h 100% limit reached, reset in 50m", line)
+        self.assertTrue(line.startswith("! "), line)
+        code, out = self.hook(T0 + 660)
+        self.assertEqual(code, 0)
+        self.assertIn("at 100% and used up", out)
+        self.assertNotIn("runs out in about 0m", out)
+
+
+class Jitter(Base):
+    def test_a_reset_time_that_moves_by_a_second_is_the_same_window(self):
+        for i, p in enumerate([10.0, 12.0, 14.0, 16.0]):
+            self.line(event(five=p, five_reset=T0 + 4 * H + (i == 3)), T0 + i * 300)  # the last one moved by 1 s
+        f = lf.forecast(lf.load(), "five_hour", T0 + 900)
+        self.assertAlmostEqual(f["rate_per_h"], 24.0, places=0)                       # 2 points / 5 min
+
+
 class HookErrors(Base):
     def test_a_hook_error_is_logged_not_swallowed(self):
         with open(os.path.join(self.tmp.name, "warned.json"), "w") as f:
