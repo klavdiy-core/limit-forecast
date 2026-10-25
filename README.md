@@ -74,7 +74,7 @@ By hand:
 - If the hook itself fails, the prompt still goes through and the reason lands in `errors.log` next to the samples.
 - Several sessions recording at once share the samples file safely: every read-modify-write holds an OS lock, and the
   file is swapped in whole (0.4.1). Before, 64 records from 8 threads kept 3 samples and 35 calls failed, and a
-  half-written `warned.json` silenced the warning for good — found by an external review, fixed in <commit>.
+  half-written `warned.json` silenced the warning for good — found by an external review, fixed in 8b6f797.
 - Built against the status-line and hook formats in the [Claude Code docs](https://code.claude.com/docs/en/statusline); tested with that input shape, not yet watched across a full 5-hour window in a live session. If your numbers look off, an issue with `python limit_forecast.py status` output helps.
 
 ## Test
