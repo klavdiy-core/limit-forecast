@@ -38,6 +38,47 @@ class ConcurrentRecords(unittest.TestCase):
         self.assertEqual(len(lf.load()), 64)
 
 
+class ReviewNotes(unittest.TestCase):
+    """Tsaplya M-377: warned under one lock; old temp files swept."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["LIMIT_FORECAST_DIR"] = self.tmp.name
+
+    def tearDown(self):
+        os.environ.pop("LIMIT_FORECAST_DIR", None)
+        self.tmp.cleanup()
+
+    def test_two_hooks_at_once_warn_once(self):
+        import io
+        from contextlib import redirect_stdout
+        now = time.time()
+        for i in range(12):
+            lf.record(now - 600 + i * 50, {"five_hour": {"used_percentage": 40 + i * 5, "resets_at": int(now + 9000)}})
+        start = threading.Barrier(6)
+        out = io.StringIO()                       # one capture for all: redirect_stdout swaps the global sys.stdout
+
+        def run():
+            start.wait()
+            lf.hook("{}", now=now)
+
+        with redirect_stdout(out):
+            ts = [threading.Thread(target=run) for _ in range(6)]
+            [t.start() for t in ts]
+            [t.join() for t in ts]
+        self.assertEqual(out.getvalue().count("5-hour"), 1)
+
+    def test_an_old_temp_file_is_swept_a_fresh_one_kept(self):
+        old = os.path.join(self.tmp.name, "samples.jsonl.999.1.tmp")
+        fresh = os.path.join(self.tmp.name, "samples.jsonl.998.1.tmp")
+        for p in (old, fresh):
+            open(p, "w").close()
+        os.utime(old, (time.time() - 7200, time.time() - 7200))
+        lf.record(time.time(), {"five_hour": {"used_percentage": 10, "resets_at": 0}})
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(fresh))
+
+
 class TornWarnedFile(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -99,6 +99,7 @@ def load():
 
 def record(now, limits):
     with _Lock():                                       # the whole read-modify-write is one step
+        _sweep_tmp()
         keep = [s for s in _load() if now - s.get("t", 0) <= KEEP_S]
         for w, v in limits.items():
             if isinstance(v, dict) and v.get("used_percentage") is not None:
@@ -235,51 +236,78 @@ def statusline(stdin_text, now=None, argv=()):
 
 # ---------- hook ----------
 
+def _decide_notes(now):
+    """The notes to give, with warned.json updated for them. The caller holds _Lock."""
+    samples = _load()
+    warned_p = os.path.join(_dir(), "warned.json")
+    warned = {}
+    if os.path.exists(warned_p):
+        try:
+            with open(warned_p, encoding="utf-8") as f:
+                warned = json.load(f)
+        except ValueError as e:
+            # a torn file once meant no warning ever again (the whole hook failed); now it is logged and reset
+            warned = {}
+            try:
+                with open(os.path.join(_dir(), "errors.log"), "a", encoding="utf-8") as fl:
+                    fl.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} hook: warned.json unreadable, reset: "
+                             f"{type(e).__name__}: {str(e)[:200]}\n")
+            except OSError:
+                pass
+    notes = []
+    for w in ("five_hour", "seven_day"):
+        f = forecast(samples, w, now)
+        if not f or f["age_s"] > STALE_S:
+            continue
+        close = f["full"] or f["pct"] >= WARN_PCT[w] or (
+            f["runs_out_before_reset"] and f["minutes_to_full"] is not None and f["minutes_to_full"] <= WARN_MINUTES)
+        if not close:
+            continue
+        last = warned.get(w)
+        if last and _same_reset(last.get("r"), f["resets_at"]) and f["pct"] < last.get("p", 0) + AGAIN_AFTER:
+            continue
+        warned[w] = {"r": f["resets_at"], "p": f["pct"]}
+        pace = (" and used up" if f["full"] else
+                f", and at the current pace it runs out in about {_hm(f['minutes_to_full'])}"
+                if f["minutes_to_full"] is not None else "")
+        reset = f" (it resets in {_hm(f['minutes_to_reset'])})" if f["minutes_to_reset"] is not None else ""
+        notes.append(f"the {NAMES[w][1]} limit is at {f['pct']:.0f}%{pace}{reset}")
+    if notes:
+        tmp = f"{warned_p}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:              # written whole, then swapped in
+            json.dump(warned, fh)
+        os.replace(tmp, warned_p)
+    return notes
+
+
+def _sweep_tmp(max_age_s=3600):
+    """Temp files left by a crash between write and swap (Tsaplya M-377): removed once they are an hour old. The
+    caller holds _Lock, so no live writer's file is touched (every writer holds it too)."""
+    now = time.time()
+    try:
+        names = os.listdir(_dir())
+    except OSError:
+        return
+    for n in names:
+        if n.endswith(".tmp") and (n.startswith("samples.jsonl.") or n.startswith("warned.json.")):
+            p = os.path.join(_dir(), n)
+            try:
+                if now - os.path.getmtime(p) > max_age_s:
+                    os.remove(p)
+            except OSError:
+                pass
+
+
 def hook(stdin_text, now=None):
     """UserPromptSubmit: print a note for Claude when a limit is close. Never blocks, never fails loudly."""
     now = time.time() if now is None else now
     try:
-        samples = load()
-        warned_p = os.path.join(_dir(), "warned.json")
-        warned = {}
-        if os.path.exists(warned_p):
-            try:
-                with open(warned_p, encoding="utf-8") as f:
-                    warned = json.load(f)
-            except ValueError as e:
-                # a torn file once meant no warning ever again (the whole hook failed); now it is logged and reset
-                warned = {}
-                try:
-                    with open(os.path.join(_dir(), "errors.log"), "a", encoding="utf-8") as fl:
-                        fl.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} hook: warned.json unreadable, reset: "
-                                 f"{type(e).__name__}: {str(e)[:200]}\n")
-                except OSError:
-                    pass
-        notes = []
-        for w in ("five_hour", "seven_day"):
-            f = forecast(samples, w, now)
-            if not f or f["age_s"] > STALE_S:
-                continue
-            close = f["full"] or f["pct"] >= WARN_PCT[w] or (
-                f["runs_out_before_reset"] and f["minutes_to_full"] is not None and f["minutes_to_full"] <= WARN_MINUTES)
-            if not close:
-                continue
-            last = warned.get(w)
-            if last and _same_reset(last.get("r"), f["resets_at"]) and f["pct"] < last.get("p", 0) + AGAIN_AFTER:
-                continue
-            warned[w] = {"r": f["resets_at"], "p": f["pct"]}
-            pace = (" and used up" if f["full"] else
-                    f", and at the current pace it runs out in about {_hm(f['minutes_to_full'])}"
-                    if f["minutes_to_full"] is not None else "")
-            reset = f" (it resets in {_hm(f['minutes_to_reset'])})" if f["minutes_to_reset"] is not None else ""
-            notes.append(f"the {NAMES[w][1]} limit is at {f['pct']:.0f}%{pace}{reset}")
+        with _Lock():
+            # read, decide and mark under one lock: two sessions reading the same warned.json both warned and wrote
+            # over each other's marks (Tsaplya M-377)
+            notes = _decide_notes(now)
         if not notes:
             return 0
-        tmp = f"{warned_p}.{os.getpid()}.{threading.get_ident()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:              # written whole, then swapped in
-            json.dump(warned, fh)
-        with _Lock():
-            os.replace(tmp, warned_p)
         event = json.loads(stdin_text or "{}")
         cwd = event.get("cwd") or os.getcwd()
         wrote = None
