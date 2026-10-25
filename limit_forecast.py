@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 KEEP_S = 6 * 3600          # samples kept
 PACE_S = 45 * 60           # pace is measured over the last 45 minutes of the current window
 MIN_SPAN_S = 5 * 60        # ... and needs at least 5 minutes of it
@@ -63,12 +63,17 @@ def record(now, limits):
     os.replace(tmp, os.path.join(_dir(), "samples.jsonl"))
 
 
+def _same_reset(a, b, slack_s=60):
+    return a == b or (a is not None and b is not None and abs(a - b) <= slack_s)
+
+
 def forecast(samples, window, now):
     mine = [s for s in samples if s.get("w") == window]
     if not mine:
         return None
     last = max(mine, key=lambda s: s["t"])
-    pts = [(s["t"], s["p"]) for s in mine if s["r"] == last["r"] and now - s["t"] <= PACE_S]
+    # the same window: a reset time reported a second or two apart is still the same reset
+    pts = [(s["t"], s["p"]) for s in mine if _same_reset(s["r"], last["r"]) and now - s["t"] <= PACE_S]
     rate = None
     if len(pts) >= 2 and max(t for t, _ in pts) - min(t for t, _ in pts) >= MIN_SPAN_S:
         mt = sum(t for t, _ in pts) / len(pts)
@@ -86,10 +91,11 @@ def forecast(samples, window, now):
         per_day = (100 - last["p"]) / days_left if days_left > 0 else None
     to_full = (100 - last["p"]) / rate * 60 if rate and rate > 0.05 else None
     to_reset = (last["r"] - now) / 60 if last["r"] else None
+    full = last["p"] >= 100                     # already out: no pace, no "per day left", only when it comes back
     return {
-        "pct": last["p"], "resets_at": last["r"], "age_s": now - last["t"],
+        "pct": last["p"], "resets_at": last["r"], "age_s": now - last["t"], "full": full,
         "rate_per_h": rate, "minutes_to_full": to_full, "minutes_to_reset": to_reset, "per_day_left": per_day,
-        "runs_out_before_reset": bool(to_full is not None and to_reset is not None and to_full < to_reset),
+        "runs_out_before_reset": full or bool(to_full is not None and to_reset is not None and to_full < to_reset),
     }
 
 
@@ -100,6 +106,9 @@ def _hm(minutes):
 
 def segment(window, f):
     short = NAMES[window][0]
+    if f.get("full"):
+        reset = f" in {_hm(f['minutes_to_reset'])}" if f["minutes_to_reset"] is not None else ""
+        return f"{short} 100% limit reached, reset{reset}"
     s = f"{short} {f['pct']:.0f}%"
     if window == "seven_day" and f.get("per_day_left") is not None:
         s += f" ({f['per_day_left']:.0f}%/day left)"          # what a week can be planned with
@@ -187,14 +196,16 @@ def hook(stdin_text, now=None):
             f = forecast(samples, w, now)
             if not f or f["age_s"] > STALE_S:
                 continue
-            close = f["pct"] >= WARN_PCT[w] or (f["runs_out_before_reset"] and f["minutes_to_full"] <= WARN_MINUTES)
+            close = f["full"] or f["pct"] >= WARN_PCT[w] or (
+                f["runs_out_before_reset"] and f["minutes_to_full"] is not None and f["minutes_to_full"] <= WARN_MINUTES)
             if not close:
                 continue
             last = warned.get(w)
-            if last and last.get("r") == f["resets_at"] and f["pct"] < last.get("p", 0) + AGAIN_AFTER:
+            if last and _same_reset(last.get("r"), f["resets_at"]) and f["pct"] < last.get("p", 0) + AGAIN_AFTER:
                 continue
             warned[w] = {"r": f["resets_at"], "p": f["pct"]}
-            pace = (f", and at the current pace it runs out in about {_hm(f['minutes_to_full'])}"
+            pace = (" and used up" if f["full"] else
+                    f", and at the current pace it runs out in about {_hm(f['minutes_to_full'])}"
                     if f["minutes_to_full"] is not None else "")
             reset = f" (it resets in {_hm(f['minutes_to_reset'])})" if f["minutes_to_reset"] is not None else ""
             notes.append(f"the {NAMES[w][1]} limit is at {f['pct']:.0f}%{pace}{reset}")
