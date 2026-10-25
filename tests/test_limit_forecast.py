@@ -69,6 +69,23 @@ class Forecast(Base):
         self.assertAlmostEqual(f["minutes_to_full"], 20, delta=1)
         self.assertTrue(s.startswith("!"), s)
 
+    def test_the_5h_window_counts_down_and_says_if_it_lasts(self):
+        # a complaint (x.com/captainsolana, 25.10): "how long until THIS window ends, and will I make it" - the end
+        # was shown only next to a time-to-full, and never as a yes/no
+        s = self.line(event(five=30, seven=10, five_reset=T0 + H + 40 * 60), T0)   # no pace yet: still a countdown
+        self.assertIn("window ends in 1h40", s)
+
+    def test_a_pace_that_outruns_the_window_says_by_how_much(self):
+        self.line(event(five=40, five_reset=T0 + 2 * H), T0 - 30 * 60)
+        s = self.line(event(five=55, five_reset=T0 + 2 * H), T0)             # 30 %/h, 45 % left = 1h30 < 2h
+        self.assertIn("window ends in 2h00", s)
+        self.assertIn("short by ~30m", s)
+
+    def test_a_pace_that_fits_says_it_lasts(self):
+        self.line(event(five=40, five_reset=T0 + H), T0 - 30 * 60)
+        s = self.line(event(five=55, five_reset=T0 + H), T0)                  # 1h30 to full > 1h left: it lasts
+        self.assertIn("window ends in 1h00, lasts", s)
+
     def test_new_window_starts_fresh(self):
         self.line(event(five=95, five_reset=T0 - 60), T0 - 30 * 60)      # old window
         self.line(event(five=2, five_reset=T0 + 5 * H), T0 - 10 * 60)    # new one
