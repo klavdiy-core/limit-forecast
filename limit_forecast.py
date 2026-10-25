@@ -18,9 +18,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 KEEP_S = 6 * 3600          # samples kept
 PACE_S = 45 * 60           # pace is measured over the last 45 minutes of the current window
 MIN_SPAN_S = 5 * 60        # ... and needs at least 5 minutes of it
@@ -38,7 +39,47 @@ def _dir():
     return d
 
 
-def load():
+class _Lock:
+    """An OS lock on a lasting file, around every read-modify-write of samples.jsonl. Status lines of several
+    sessions record at once: 64 records from 8 threads kept 3 samples and 35 died on FileNotFoundError (one shared
+    .tmp, no lock - external review, 25.10). The kernel drops the lock when its holder dies."""
+
+    def __init__(self, wait_s=5.0):
+        self.path, self.wait_s, self.f = os.path.join(_dir(), "samples.lock"), wait_s, None
+
+    def __enter__(self):
+        self.f = open(self.path, "a+b")
+        end = time.time() + self.wait_s
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    self.f.seek(0)
+                    msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.time() > end:
+                    self.f.close()
+                    raise TimeoutError("limit-forecast: samples are locked by another session")
+                time.sleep(0.005)
+
+    def __exit__(self, *exc):
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.f.close()
+
+
+def _load():
     p = os.path.join(_dir(), "samples.jsonl")
     out = []
     if os.path.exists(p):
@@ -51,16 +92,22 @@ def load():
     return out
 
 
+def load():
+    with _Lock():
+        return _load()
+
+
 def record(now, limits):
-    keep = [s for s in load() if now - s.get("t", 0) <= KEEP_S]
-    for w, v in limits.items():
-        if isinstance(v, dict) and v.get("used_percentage") is not None:
-            keep.append({"t": now, "w": w, "p": float(v["used_percentage"]), "r": int(v.get("resets_at") or 0)})
-    tmp = os.path.join(_dir(), "samples.jsonl.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        for s in keep:
-            f.write(json.dumps(s) + "\n")
-    os.replace(tmp, os.path.join(_dir(), "samples.jsonl"))
+    with _Lock():                                       # the whole read-modify-write is one step
+        keep = [s for s in _load() if now - s.get("t", 0) <= KEEP_S]
+        for w, v in limits.items():
+            if isinstance(v, dict) and v.get("used_percentage") is not None:
+                keep.append({"t": now, "w": w, "p": float(v["used_percentage"]), "r": int(v.get("resets_at") or 0)})
+        tmp = os.path.join(_dir(), f"samples.jsonl.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            for s in keep:
+                f.write(json.dumps(s) + "\n")
+        os.replace(tmp, os.path.join(_dir(), "samples.jsonl"))
 
 
 def _same_reset(a, b, slack_s=60):
@@ -196,8 +243,18 @@ def hook(stdin_text, now=None):
         warned_p = os.path.join(_dir(), "warned.json")
         warned = {}
         if os.path.exists(warned_p):
-            with open(warned_p, encoding="utf-8") as f:
-                warned = json.load(f)
+            try:
+                with open(warned_p, encoding="utf-8") as f:
+                    warned = json.load(f)
+            except ValueError as e:
+                # a torn file once meant no warning ever again (the whole hook failed); now it is logged and reset
+                warned = {}
+                try:
+                    with open(os.path.join(_dir(), "errors.log"), "a", encoding="utf-8") as fl:
+                        fl.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} hook: warned.json unreadable, reset: "
+                                 f"{type(e).__name__}: {str(e)[:200]}\n")
+                except OSError:
+                    pass
         notes = []
         for w in ("five_hour", "seven_day"):
             f = forecast(samples, w, now)
@@ -218,8 +275,11 @@ def hook(stdin_text, now=None):
             notes.append(f"the {NAMES[w][1]} limit is at {f['pct']:.0f}%{pace}{reset}")
         if not notes:
             return 0
-        with open(warned_p, "w", encoding="utf-8") as fh:
+        tmp = f"{warned_p}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:              # written whole, then swapped in
             json.dump(warned, fh)
+        with _Lock():
+            os.replace(tmp, warned_p)
         event = json.loads(stdin_text or "{}")
         cwd = event.get("cwd") or os.getcwd()
         wrote = None
