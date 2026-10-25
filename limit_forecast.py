@@ -5,8 +5,8 @@ Claude Code hands its status line the plan's rate limits (5-hour and 7-day: perc
 and Max subscribers. This script, used as the status line, records them, measures your pace and shows when you
 will hit 100% at that pace, next to when the window resets:
 
-    5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41%
-    ! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52%        <- "!" : you run out before the reset
+    5h 63% +18%/h · window ends in 1h40, lasts | 7d 41%
+    ! 5h 88% +40%/h · window ends in 2h10, short by ~1h52 | 7d 52%   <- "!" : you run out before the reset
 
 As a UserPromptSubmit hook it tells Claude itself when the end is near, so the work is committed and handed off
 while there is still budget to do it. No tokens, no network: only the data Claude Code already gives the status
@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 KEEP_S = 6 * 3600          # samples kept
 PACE_S = 45 * 60           # pace is measured over the last 45 minutes of the current window
 MIN_SPAN_S = 5 * 60        # ... and needs at least 5 minutes of it
@@ -114,7 +114,14 @@ def segment(window, f):
         s += f" ({f['per_day_left']:.0f}%/day left)"          # what a week can be planned with
     elif f["rate_per_h"]:
         s += f" +{f['rate_per_h']:.0f}%/h"
-    if f["minutes_to_full"] is not None and (window == "five_hour" or f["runs_out_before_reset"]):
+    if window == "five_hour" and f["minutes_to_reset"] is not None:
+        # the countdown of THIS window, always, and a plain verdict once there is a pace (a complaint, 25.10:
+        # "how long until the window ends, and will I make it")
+        s += f" · window ends in {_hm(f['minutes_to_reset'])}"
+        if f["minutes_to_full"] is not None:
+            gap = f["minutes_to_reset"] - f["minutes_to_full"]
+            s += f", short by ~{_hm(gap)}" if gap > 0 else ", lasts"
+    elif f["minutes_to_full"] is not None and (window == "five_hour" or f["runs_out_before_reset"]):
         s += f" -> full ~{_hm(f['minutes_to_full'])}"
         if f["minutes_to_reset"] is not None:
             s += f" (reset {_hm(f['minutes_to_reset'])})"

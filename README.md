@@ -18,8 +18,8 @@ Claude Code gives its status line the plan's rate limits (Pro and Max: 5-hour an
 - shows when you hit 100% at that pace, next to when the window resets:
 
 ```
-5h 63% +18%/h -> full ~2h03 (reset 1h40) | 7d 41% (20%/day left)
-! 5h 88% +40%/h -> full ~18m (reset 2h10) | 7d 52% (16%/day left)
+5h 63% +18%/h · window ends in 1h40, lasts | 7d 41% (20%/day left)
+! 5h 88% +40%/h · window ends in 2h10, short by ~1h52 | 7d 52% (16%/day left)
 ! 5h 100% limit reached, reset in 50m | 7d 61% (13%/day left)
 ```
 
