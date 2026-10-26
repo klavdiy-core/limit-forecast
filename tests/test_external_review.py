@@ -39,7 +39,7 @@ class ConcurrentRecords(unittest.TestCase):
 
 
 class ReviewNotes(unittest.TestCase):
-    """Tsaplya M-377: warned under one lock; old temp files swept."""
+    """A second review: warned under one lock; old temp files swept."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

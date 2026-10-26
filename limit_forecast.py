@@ -281,7 +281,7 @@ def _decide_notes(now):
 
 
 def _sweep_tmp(max_age_s=3600):
-    """Temp files left by a crash between write and swap (Tsaplya M-377): removed once they are an hour old. The
+    """Temp files left by a crash between write and swap (a second review): removed once they are an hour old. The
     caller holds _Lock, so no live writer's file is touched (every writer holds it too)."""
     now = time.time()
     try:
@@ -304,7 +304,7 @@ def hook(stdin_text, now=None):
     try:
         with _Lock():
             # read, decide and mark under one lock: two sessions reading the same warned.json both warned and wrote
-            # over each other's marks (Tsaplya M-377)
+            # over each other's marks (a second review)
             notes = _decide_notes(now)
         if not notes:
             return 0
